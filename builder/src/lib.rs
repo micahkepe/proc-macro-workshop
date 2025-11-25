@@ -1,7 +1,28 @@
+//! Adapted from: <https://www.youtube.com/watch?v=geovSK3wMB8>
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use quote::quote;
 use syn::{DeriveInput, parse_macro_input};
+
+fn ty_is_option(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(p) = ty {
+        if p.path.segments.len() != 1 || p.path.segments[0].ident != "Option" {
+            return None;
+        }
+
+        if let syn::PathArguments::AngleBracketed(ref inner_ty) = p.path.segments[0].arguments {
+            if !inner_ty.args.len() == 1 {
+                return None;
+            }
+
+            let inner_ty = inner_ty.args.first().unwrap();
+            if let syn::GenericArgument::Type(t) = inner_ty {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -9,41 +30,79 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let name = &ast.ident;
     let builder_name = format!("{}Builder", name);
     let builder_ident = Ident::new(&builder_name, name.span());
+    let fields = if let syn::Data::Struct(syn::DataStruct {
+        fields: syn::Fields::Named(syn::FieldsNamed { ref named, .. }),
+        ..
+    }) = ast.data
+    {
+        named
+    } else {
+        // Don't support on enums or other types
+        unimplemented!()
+    };
+
+    let optionized = fields.iter().map(|f| {
+        let name = &f.ident;
+        let ty = &f.ty;
+        if ty_is_option(ty).is_some() {
+            quote! { #name: #ty }
+        } else {
+            quote! { #name: std::option::Option<#ty> }
+        }
+    });
+
+    let methods = fields.iter().map(|f| {
+        let name = &f.ident;
+        let ty = &f.ty;
+        if let Some(inner_ty) = ty_is_option(ty) {
+            quote! {
+                pub fn #name(&mut self, #name: #inner_ty) -> &mut Self {
+                    self.#name = Some(#name);
+                    self
+                }
+            }
+        } else {
+            quote! {
+                pub fn #name(&mut self, #name: #ty) -> &mut Self {
+                    self.#name = Some(#name);
+                    self
+                }
+            }
+        }
+    });
+
+    let build_fields = fields.iter().map(|f| {
+        let name = &f.ident;
+        let ty = &f.ty;
+        if ty_is_option(ty).is_some() {
+            quote! {
+                #name: self.#name.clone()
+            }
+        } else {
+            quote! {
+                #name: self.#name.clone().ok_or(concat!(stringify!(#name), " is not set"))?
+            }
+        }
+    });
+
+    let build_empty = fields.iter().map(|f| {
+        let name = &f.ident;
+        quote! {
+            #name: std::option::Option::None
+        }
+    });
+
     let expanded = quote! {
         pub struct #builder_ident {
-            executable: Option<String>,
-            args: Option<Vec<String>>,
-            env: Option<Vec<String>>,
-            current_dir: Option<String>,
+            #(#optionized,)*
         }
 
         impl #builder_ident {
-             pub fn executable(&mut self, executable: String) -> &mut Self {
-                 self.executable = Some(executable);
-                 self
-             }
+            #(#methods)*
 
-             pub fn args(&mut self, args: Vec<String>) -> &mut Self {
-                 self.args = Some(args);
-                 self
-             }
-
-             pub fn env(&mut self, env: Vec<String>) -> &mut Self {
-                 self.env = Some(env);
-                 self
-             }
-
-             pub fn current_dir(&mut self, current_dir: String) -> &mut Self {
-                 self.current_dir = Some(current_dir);
-                 self
-             }
-
-             pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+             pub fn build(&self) -> Result<#name, Box<dyn std::error::Error>> {
                  Ok(#name {
-                    executable: self.executable.take().ok_or("executable is not set")?,
-                    args: self.args.take().ok_or("args is not set")?,
-                    env: self.env.take().ok_or("env is not set")?,
-                    current_dir: self.current_dir.take().ok_or("current_dir is not set")?,
+                     #(#build_fields,)*
                  })
              }
         }
@@ -51,10 +110,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #name {
             fn builder() -> #builder_ident {
                 #builder_ident {
-                    executable: None,
-                    args: None,
-                    env: None,
-                    current_dir: None,
+                    #(#build_empty,)*
                 }
             }
         }
