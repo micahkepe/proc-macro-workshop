@@ -4,7 +4,7 @@ use proc_macro2::Ident;
 use quote::quote;
 use syn::{DeriveInput, parse_macro_input};
 
-fn ty_is_option(ty: &syn::Type) -> Option<&syn::Type> {
+fn ty_is_option(ty: &syn::Type) -> std::option::Option<&syn::Type> {
     if let syn::Type::Path(p) = ty {
         if p.path.segments.len() != 1 || p.path.segments[0].ident != "Option" {
             return None;
@@ -22,6 +22,26 @@ fn ty_is_option(ty: &syn::Type) -> Option<&syn::Type> {
         }
     }
     None
+}
+
+fn has_each_attribute(field: &syn::Field) -> bool {
+    for attr in &field.attrs {
+        if let Some(ident) = attr.path().get_ident()
+            && ident == "builder"
+        {
+            let mut has_each = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("each") {
+                    has_each = true
+                }
+                Ok(())
+            });
+            if has_each {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -58,7 +78,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let name = &f.ident;
         let ty = &f.ty;
 
-        let mut each_name: Option<syn::Ident> = None;
+        let mut each_name: std::option::Option<syn::Ident> = None;
         let mut has_each = false;
 
         for attr in &f.attrs {
@@ -84,7 +104,40 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        if let Some(inner_ty) = ty_is_option(ty) {
+        if let Some(each) = each_name {
+            let inner_ty = if let syn::Type::Path(ty_path) = ty {
+                if let Some(s) = ty_path.path.segments.last() {
+                    if s.ident == "Vec" {
+                        if let syn::PathArguments::AngleBracketed(args) = &s.arguments {
+                            if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                                inner
+                            } else {
+                                panic!("Vec must havea type argument")
+                            }
+                        } else {
+                            panic!("Vec must have angle brackets")
+                        }
+                    } else {
+                        panic!("#[builder(each = ... )] can only be used on Vec fields")
+                    }
+                } else {
+                    panic!("Invalid type path")
+                }
+            } else {
+                panic!("#[builder(each = ... )] can only be used on Vec fields")
+            };
+
+            quote! {
+                pub fn #each(&mut self, #each: #inner_ty) -> &mut Self {
+                    if let Some(ref mut vec) = self.#name {
+                        vec.push(#each);
+                    } else {
+                        self.#name = Some(vec![#each])
+                    }
+                    self
+                }
+            }
+        } else if let Some(inner_ty) = ty_is_option(ty) {
             quote! {
                 pub fn #name(&mut self, #name: #inner_ty) -> &mut Self {
                     self.#name = Some(#name);
@@ -104,7 +157,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let build_fields = fields.iter().map(|f| {
         let name = &f.ident;
         let ty = &f.ty;
-        if ty_is_option(ty).is_some() {
+
+        if has_each_attribute(f) {
+            quote! {
+                #name: self.#name.clone().unwrap_or_else(Vec::new)
+            }
+        } else if ty_is_option(ty).is_some() {
             quote! {
                 #name: self.#name.clone()
             }
@@ -130,7 +188,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #builder_ident {
             #(#methods)*
 
-             pub fn build(&self) -> Result<#name, Box<dyn std::error::Error>> {
+             pub fn build(&self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error>> {
                  Ok(#name {
                      #(#build_fields,)*
                  })
