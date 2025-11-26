@@ -24,9 +24,12 @@ fn ty_is_option(ty: &syn::Type) -> Option<&syn::Type> {
     None
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
+
+    //eprintln!("{:#?}", ast);
+
     let name = &ast.ident;
     let builder_name = format!("{}Builder", name);
     let builder_ident = Ident::new(&builder_name, name.span());
@@ -54,6 +57,33 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let methods = fields.iter().map(|f| {
         let name = &f.ident;
         let ty = &f.ty;
+
+        let mut each_name: Option<syn::Ident> = None;
+        let mut has_each = false;
+
+        for attr in &f.attrs {
+            if let Some(ident) = attr.path().get_ident() {
+                match ident.to_string().as_str() {
+                    "builder" => {
+                        if let Err(e) = attr.parse_nested_meta(|meta| {
+                            if meta.path.is_ident("each") {
+                                let lit: syn::LitStr = meta.value()?.parse()?;
+                                each_name = Some(syn::Ident::new(&lit.value(), lit.span()));
+                                has_each = true;
+                                Ok(())
+                            } else {
+                                Err(meta.error("expected `builder(each = \"...\")`"))
+                            }
+                        }) {
+                            return syn::Error::new_spanned(&attr.meta, e.to_string())
+                                .to_compile_error();
+                        }
+                    }
+                    _ => panic!("unrecognized attribute"),
+                }
+            }
+        }
+
         if let Some(inner_ty) = ty_is_option(ty) {
             quote! {
                 pub fn #name(&mut self, #name: #inner_ty) -> &mut Self {
